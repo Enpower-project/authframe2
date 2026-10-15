@@ -1,0 +1,212 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    command: 
+      - start
+      - --hostname=localhost
+      - --http-enabled=false
+      - --https-certificate-file=/opt/keycloak/certs/tls.crt
+      - --https-certificate-key-file=/opt/keycloak/certs/tls.key
+      - --https-port=8443
+      - --import-realm
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://${DB_HOST}:${DB_PORT}/${KC_DB_NAME}
+      KC_DB_USERNAME: ${KC_DB_USER}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+      KEYCLOAK_HOSTNAME_STRICT: false
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+    volumes:
+      - ./keycloak/import:/opt/keycloak/data/import
+      - ./keycloak/certs:/opt/keycloak/certs:ro
+    ports:
+      - "8443:8443"
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - net
+
+
+  database:
+    image: postgres:16.3
+    restart: unless-stopped
+    volumes:
+      - database:/var/lib/postgresql/data
+      - ./db/init-multiple-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-dbs.sh
+    command: [
+      "postgres",
+      "-c", "track_commit_timestamp=on"
+    ]
+    environment:
+      - POSTGRES_USER=root
+      - POSTGRES_PASSWORD=password
+      - KEYCLOAK_DB_NAME=${KC_DB_NAME}
+      - AUTHFRAME_DB_NAME=${AUTHFRAME_DB}
+      - SPICEDB_DB_NAME=${SPICEDB_DB}
+      - ECMP_DB_NAME=${ECMP_DB}
+      - KC_DB_USER=${KC_DB_USER}
+      - KC_DB_PASSWORD=${KC_DB_PASSWORD}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U root" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - net
+
+
+  api:
+    build: ./api
+    entrypoint: ["/entrypoint.sh"]
+    volumes:
+    - ./keycloak/certs/ca.crt:/usr/local/share/ca-certificates/keycloak-ca.crt:ro
+    ports:
+      - "8001:8000"
+    networks:
+      - net
+
+
+  spicedb:
+    image: authzed/spicedb:v1.45.4
+    restart: unless-stopped
+    command: [
+      "serve",
+      "--grpc-preshared-key=supersecretkey",
+      "--http-enabled=true",
+      "--http-addr=:8088",
+      "--grpc-enabled=true",
+      "--datastore-engine", "postgres",
+      "--datastore-conn-uri", "postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${SPICEDB_DB}?sslmode=disable"
+    ]
+    ports:
+      - "50051:50051"   # gRPC API
+      - "8088:8088"     # HTTP Gateway + metrics
+    depends_on:
+      - spicedb-migrate
+    networks:
+      - net
+  
+
+  spicedb-migrate:
+    build: ./spicedb
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      SPICEDB_NAME: ${SPICEDB_DB}
+    restart: "no"
+    networks:
+      - net
+
+
+  pdp:
+    build: ./pdp
+    entrypoint: ["/entrypoint.sh"]
+    volumes:
+      - ./pdp/certs/pdp.crt:/certs/pdp.crt:ro
+      - ./pdp/certs/pdp.key:/certs/pdp.key:ro
+      - ./pdp/certs/ca.crt:/certs/ca.crt:ro
+    ports:
+      - "8085:8081"
+      # - "8444:8444"
+    networks:
+      - net
+
+
+  envoy:
+    # image: envoyproxy/envoy:v1.31-latest
+    # image: envoyproxy/envoy:v1.35-latest
+    build: ./envoy
+    restart: unless-stopped
+    volumes:
+      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml
+      # - ./certs:/etc/ssl/certs
+      # - ./envoy/logs:/var/log/envoy
+      - envoy_logs:/var/log/envoy
+      # - ./keycloak/certs/ca.crt:/etc/ssl/certs/keycloak-ca.crt:ro
+      # - ./pdp/certs/envoy.crt:/certs/envoy.crt:ro
+      # - ./pdp/certs/envoy.key:/certs/envoy.key:ro
+      # - ./pdp/certs/ca.crt:/certs/ca.crt:ro
+    ports:
+      - "8081:8080"
+      # - "443:443"
+      - "9901:9901"
+    command: 
+      - envoy
+      - -c
+      - /etc/envoy/envoy.yaml
+      # - --log-level
+      # - trace
+    networks:
+      - net
+
+
+  upstream-service:
+    build:
+      context: ./upstream
+      dockerfile: ./Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ./upstream/service.py:/code/service.py
+    ports:
+      - "8002:8001"
+    networks:
+      - net
+    
+
+  vector:
+    image: timberio/vector:latest-alpine
+    command:
+      - --config
+      - /etc/vector/vector.yaml
+      - --require-healthy
+      - "true"
+      - --watch-config
+    volumes:
+      - ./vector/vector.yaml:/etc/vector/vector.yaml:ro
+      # - ./envoy/logs:/var/log/envoy:ro
+      - envoy_logs:/var/log/envoy:ro
+      # - ./pep/logs:/var/log/pep:ro
+    restart: unless-stopped
+    networks:
+      - net
+    depends_on:
+      - envoy
+  
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+    - CLICKHOUSE_DB=${CLICKHOUSE_DB_NAME}
+    - CLICKHOUSE_USER=${CLICKHOUSE_DB_USER}
+    - CLICKHOUSE_PASSWORD=${CLICKHOUSE_DB_PASSWORD}
+    restart: unless-stopped
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/initdb:/docker-entrypoint-initdb.d 
+      - ./clickhouse/config.xml:/etc/clickhouse-server/config.d/custom.xml:ro
+      - ./clickhouse/logs:/var/log/clickhouse-server
+    networks:
+      - net
+
+volumes:
+  envoy_logs:
+  database:
+  keycloak:
+  clickhouse-data:
+      
+
+networks:
+  net:
+    driver: bridge
+

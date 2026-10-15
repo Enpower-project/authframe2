@@ -1,0 +1,43 @@
+sources:
+  pep_logs:
+    type: file
+    include:
+      - /var/log/envoy/access.log
+
+transforms:
+  remap_pep:
+    type: remap
+    inputs:
+      - pep_logs
+    source: |
+      structured = parse_json(.message) ?? {}
+      del(.message)
+      . = merge!(., structured)
+      .timestamp = parse_timestamp!(.timestamp, "%+")
+      .timestamp = format_timestamp!(.timestamp, "%Y-%m-%dT%H:%M:%S%.3f")
+      del(.structured)
+      
+
+sinks:
+  clickhouse_pep:
+    type: clickhouse
+    inputs:
+      - remap_pep
+    database: enpower
+    table: pep_audit_log
+    endpoint: http://192.168.6.136:8123
+    compression: none
+    format: json_each_row
+    batch:
+      max_events: 1
+    auth:
+      strategy: basic
+      user: enpower
+      password: securepassword
+
+  # debug:
+  #   type: console
+  #   inputs:
+  #     - remap_fields
+  #   encoding:
+  #     codec: json

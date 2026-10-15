@@ -1,0 +1,13 @@
+FROM alpine:3.20
+
+# Install postgres client (for pg_isready)
+RUN apk add --no-cache postgresql-client curl
+
+# Download spicedb binary
+ADD https://github.com/authzed/spicedb/releases/download/v1.45.4/spicedb_1.45.4_linux_amd64.tar.gz /tmp/
+RUN tar -xzf /tmp/spicedb_1.45.4_linux_amd64.tar.gz -C /usr/local/bin && rm /tmp/spicedb_1.45.4_linux_amd64.tar.gz
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

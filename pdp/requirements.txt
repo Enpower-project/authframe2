@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+python-jose[cryptography]
+aiohttp
+python-dotenv
+python-keycloak
+sqlalchemy
+psycopg2-binary
+alembic
+PyJWT
+clickhouse-connect
+grpcio
+authzed>=0.13.0
+protobuf
